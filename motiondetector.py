@@ -78,7 +78,7 @@ class MotionDetector:
             capture = cv2.VideoCapture(self.video_url)
             try:
                 self.__process_stream(capture)
-            except InterruptedError:
+            except KeyboardInterrupt:
                 logging.info("Exiting...")
                 self.exit = True
             except:
