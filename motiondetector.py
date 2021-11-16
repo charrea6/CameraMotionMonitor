@@ -35,7 +35,9 @@ class MotionTracker:
             if not self.motion_detected:
                 self.motion_detected = True
                 self.motion_started = now
-                save_path = os.path.join("motion", now.strftime("%Y_%m_%d-%H_%M_%S.mp4"))
+                save_dir = os.path.join("motion", now.strftime("%Y/%m/%d"))
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, now.strftime("%Y_%m_%d-%H_%M_%S.mp4"))
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 height, width = frame.shape[:2]
                 self.video_out = cv2.VideoWriter(save_path, fourcc, 12, (width, height), True)
