@@ -4,13 +4,15 @@ import cv2
 import os
 import logging
 import argparse
+from urllib.parse import urlparse
+from paho.mqtt import publish
 
 # Inspired by the article here:
 # https://www.pyimagesearch.com/2015/05/25/basic-motion-detection-and-tracking-with-python-and-opencv/
 
 
 class MotionTracker:
-    def __init__(self):
+    def __init__(self, callback=None):
         self.last_motion_detection = None
         self.motion_detected = False
         self.motion_started = None
@@ -19,6 +21,7 @@ class MotionTracker:
         self.frames_before_motion = datetime.timedelta(seconds=5)
         self.frames = collections.deque()
         self.video_out = None
+        self.callback = callback
 
     def update_motion(self, motion: bool, frame) -> None:
         now = datetime.datetime.now()
@@ -55,6 +58,7 @@ class MotionTracker:
 
     def signal_motion_detected_changed(self):
         logging.info("Motion %s", self.motion_detected and 'started' or 'stopped')
+        self.callback(self.motion_detected)
 
 
 class MotionDetector:
@@ -136,6 +140,30 @@ class MotionDetector:
                     break
 
 
+class MQTTNotifier:
+    def __init__(self, url, topic):
+        self.url_details = urlparse(url)
+        self.topic = topic
+        if self.url_details.scheme not in ('mqtt', 'mqtts'):
+            raise RuntimeError('Unsupported URL for MQTT "%s"' % url)
+
+    def _get_connection_details(self):
+        kwargs = { "hostname": self.url_details.hostname}
+        if self.url_details.scheme == 'mqtts':
+            kwargs['ssl'] = True
+        if self.url_details.port is not None:
+            kwargs['port'] = self.url_details.port
+        if self.url_details.username is not None:
+            kwargs['username'] = self.url_details.username
+        if self.url_details.password is not None:
+            kwargs['password'] = self.url_details.password
+        return kwargs
+
+    def motion_updated(self, motion_detected):
+        kwargs = self._get_connection_details()
+        publish.single(self.topic, payload=motion_detected and "motion start" or "motion stop", **kwargs)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Looks for motion in the video stream specified and takes short "
                                                  "snapshot videos of this motion, optionally posting an MQTT message")
@@ -145,6 +173,10 @@ if __name__ == '__main__':
     parser.add_argument("--show-video", action="store_true", help="Show the video in a window.")
     parser.add_argument("--show-processing", action="store_true", help="Show the processing steps in separate windows,"
                                                                        " needs --show-video")
+    parser.add_argument("--mqtt", help="URL of the MQTT server to connect to send motion notifications to. "
+                        "URLs are in the form mqtt[s]://<hostname>[:port]",
+                        default=None)
+    parser.add_argument("--topic", help="MQTT Topic to send motion notifications to.", default="motiondetector/state")
 
     logging.basicConfig(format="%(asctime)-15s : %(levelname)s : %(message)s", level=logging.INFO)
     args = parser.parse_args()
@@ -152,7 +184,12 @@ if __name__ == '__main__':
     if args.mask:
         logging.info("Using mask from %s", args.mask)
 
-    tracker = MotionTracker()
+    if args.mqtt:
+        motion_callback = MQTTNotifier(args.mqtt, args.topic).motion_updated
+    else:
+        motion_callback = None
+
+    tracker = MotionTracker(motion_callback)
     detector = MotionDetector(tracker, args.stream, mask_filename=args.mask, show_video=args.show_video,
                               show_processing=args.show_processing)
     detector.process()
