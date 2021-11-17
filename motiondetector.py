@@ -17,9 +17,15 @@ class MotionTracker:
         self.motion_detected = False
         self.motion_started = None
         self.motion_stopped = None
+
+        self.motion_start_timeout = datetime.timedelta(seconds=1)
+        self.motion_events_threshold = 10
         self.motion_timeout = datetime.timedelta(seconds=5)
         self.frames_before_motion = datetime.timedelta(seconds=5)
+
         self.frames = collections.deque()
+        self.motion_events = collections.deque()
+        self.write_frames = False
         self.video_out = None
         self.callback = callback
 
@@ -27,14 +33,19 @@ class MotionTracker:
         now = datetime.datetime.now()
 
         self.frames.append((now, frame))
-        while len(self.frames) and now - self.frames[0][0] > self.frames_before_motion:
+        while len(self.frames) and now - self.frames[0][0] > (self.frames_before_motion + self.motion_start_timeout):
             self.frames.popleft()
 
+        while len(self.motion_events) and now - self.motion_events[0] > self.motion_start_timeout:
+            self.motion_events.popleft()
+
         if motion:
+            self.motion_events.append(now)
             self.last_motion_detection = now
-            if not self.motion_detected:
+
+            if not self.motion_detected and len(self.motion_events) >= self.motion_events_threshold:
                 self.motion_detected = True
-                self.motion_started = now
+
                 save_dir = os.path.join("motion", now.strftime("%Y/%m/%d"))
                 os.makedirs(save_dir, exist_ok=True)
                 save_path = os.path.join(save_dir, now.strftime("%Y_%m_%d-%H_%M_%S.mp4"))
@@ -45,18 +56,18 @@ class MotionTracker:
                     self.video_out.write(prev_frame)
 
                 self.signal_motion_detected_changed()
-            else:
-                self.video_out.write(frame)
-        else:
-            if self.motion_detected:
-                delta = now - self.last_motion_detection
-                self.video_out.write(frame)
-                if delta > self.motion_timeout:
-                    self.motion_detected = False
-                    self.motion_stopped = now
-                    self.video_out.release()
-                    self.video_out = None
-                    self.signal_motion_detected_changed()
+                return
+
+        if self.motion_detected:
+            self.video_out.write(frame)
+            delta = now - self.last_motion_detection
+            if delta > self.motion_timeout:
+                self.motion_detected = False
+                self.motion_stopped = now
+                self.motion_started = None
+                self.video_out.release()
+                self.video_out = None
+                self.signal_motion_detected_changed()
 
     def signal_motion_detected_changed(self):
         logging.info("Motion %s", self.motion_detected and 'started' or 'stopped')
