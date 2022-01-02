@@ -5,7 +5,7 @@ import os
 import logging
 import argparse
 from urllib.parse import urlparse
-from paho.mqtt import publish
+import paho.mqtt.client as mqtt
 
 # Inspired by the article here:
 # https://www.pyimagesearch.com/2015/05/25/basic-motion-detection-and-tracking-with-python-and-opencv/
@@ -75,7 +75,8 @@ class MotionTracker:
 
 
 class MotionDetector:
-    def __init__(self, tracker, video_url, mask_filename=None, show_video=True, show_processing=False):
+    def __init__(self, tracker, video_url, mask_filename=None, show_video=True, show_processing=False,
+                 frame_display=None):
         self.tracker = tracker
         self.video_url = video_url
         self.last_frame = None
@@ -83,6 +84,7 @@ class MotionDetector:
         self.exit = False
         self.show_video = show_video
         self.show_processing = show_processing
+        self.frame_display = frame_display
 
         if mask_filename:
             self.mask = cv2.imread(mask_filename)
@@ -131,6 +133,8 @@ class MotionDetector:
                 cv2.rectangle(to_display, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 found_motion = True
 
+            if self.frame_display is not None:
+                self.frame_display(to_display)
             self.tracker.update_motion(found_motion, to_display)
 
             if (now - self.update_last_frame).total_seconds() > 1:
@@ -154,27 +158,44 @@ class MotionDetector:
 
 
 class MQTTNotifier:
-    def __init__(self, url, topic):
-        self.url_details = urlparse(url)
+    def __init__(self, client, topic):
+        self.client = client
         self.topic = topic
-        if self.url_details.scheme not in ('mqtt', 'mqtts'):
-            raise RuntimeError('Unsupported URL for MQTT "%s"' % url)
-
-    def _get_connection_details(self):
-        kwargs = { "hostname": self.url_details.hostname}
-        if self.url_details.scheme == 'mqtts':
-            kwargs['ssl'] = True
-        if self.url_details.port is not None:
-            kwargs['port'] = self.url_details.port
-        if self.url_details.username is not None:
-            kwargs['username'] = self.url_details.username
-        if self.url_details.password is not None:
-            kwargs['password'] = self.url_details.password
-        return kwargs
 
     def motion_updated(self, motion_detected):
-        kwargs = self._get_connection_details()
-        publish.single(self.topic, payload=motion_detected and "motion start" or "motion stop", **kwargs)
+        self.client.publish(self.topic, payload=motion_detected and "motion start" or "motion stop")
+
+
+class MQTTFrameDisplay:
+    def __init__(self, client, topic):
+        self.client = client
+        self.topic = topic
+
+    def frame_display(self, frame):
+        success, data = cv2.imencode(".jpg", frame)
+        if success:
+            self.client.publish(self.topic, payload=data.tobytes())
+
+
+def mqtt_client(url):
+    url_details = urlparse(url)
+    if url_details.scheme not in ('mqtt', 'mqtts'):
+        raise RuntimeError('Unsupported URL for MQTT "%s"' % url)
+
+    kwargs = {}
+    if url_details.scheme == 'mqtts':
+        kwargs['ssl'] = True
+    if url_details.port is not None:
+        kwargs['port'] = url_details.port
+    if url_details.username is not None:
+        kwargs['username'] = url_details.username
+    if url_details.password is not None:
+        kwargs['password'] = url_details.password
+
+    client = mqtt.Client()
+    client.connect(url_details.hostname, **kwargs)
+    client.loop_start()
+    return client
 
 
 if __name__ == '__main__':
@@ -190,6 +211,10 @@ if __name__ == '__main__':
                         "URLs are in the form mqtt[s]://<hostname>[:port]",
                         default=None)
     parser.add_argument("--topic", help="MQTT Topic to send motion notifications to.", default="motiondetector/state")
+    parser.add_argument("--displaytopic",
+                        help="MQTT Topic used to send realtime JPEG encoded frames from the video stream being"
+                             " monitored",
+                        default="")
 
     logging.basicConfig(format="%(asctime)-15s : %(levelname)s : %(message)s", level=logging.INFO)
     args = parser.parse_args()
@@ -197,13 +222,18 @@ if __name__ == '__main__':
     if args.mask:
         logging.info("Using mask from %s", args.mask)
 
+    motion_callback = None
+    display_frame = None
+
     if args.mqtt:
-        motion_callback = MQTTNotifier(args.mqtt, args.topic).motion_updated
-    else:
-        motion_callback = None
+        client = mqtt_client(args.mqtt)
+        motion_callback = MQTTNotifier(client, args.topic).motion_updated
+
+        if args.displaytopic:
+            display_frame = MQTTFrameDisplay(client, args.displaytopic).frame_display
 
     tracker = MotionTracker(motion_callback)
     detector = MotionDetector(tracker, args.stream, mask_filename=args.mask, show_video=args.show_video,
-                              show_processing=args.show_processing)
+                              show_processing=args.show_processing, frame_display=display_frame)
     detector.process()
     cv2.destroyAllWindows()
